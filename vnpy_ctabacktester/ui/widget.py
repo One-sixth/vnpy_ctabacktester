@@ -3,10 +3,14 @@ import subprocess
 from datetime import datetime, timedelta
 from copy import copy
 from typing import List, Tuple
+from lightweight_charts.widgets import QtChart
+import random
+from qtpy.QtWidgets import QVBoxLayout
 
 import numpy as np
 import pyqtgraph as pg
 from pandas import DataFrame
+from copy import deepcopy
 
 from vnpy.trader.constant import Interval, Direction, Exchange
 from vnpy.trader.engine import MainEngine, BaseEngine
@@ -18,6 +22,7 @@ from vnpy.trader.utility import load_json, save_json
 from vnpy.trader.object import BarData, TradeData, OrderData
 from vnpy.trader.database import DB_TZ
 from vnpy_ctastrategy.backtesting import DailyResult
+from vnpy_ctastrategy.base import IndicatorStore, IndicatorConfig, IndicatorMarkItem
 
 from ..locale import _
 from ..engine import (
@@ -100,6 +105,8 @@ class BacktesterManager(QtWidgets.QWidget):
         self.size_line: QtWidgets.QLineEdit = QtWidgets.QLineEdit("300")
         self.pricetick_line: QtWidgets.QLineEdit = QtWidgets.QLineEdit("0.2")
         self.capital_line: QtWidgets.QLineEdit = QtWidgets.QLineEdit("1000000")
+        self.ban_short_box: QtWidgets.QCheckBox = QtWidgets.QCheckBox(_("禁止卖空"))
+        self.trade_on_close_price_box: QtWidgets.QCheckBox = QtWidgets.QCheckBox(_("收盘价撮合"))
 
         backtesting_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("开始回测"))
         backtesting_button.clicked.connect(self.start_backtesting)
@@ -162,6 +169,10 @@ class BacktesterManager(QtWidgets.QWidget):
         form.addRow(_("价格跳动"), self.pricetick_line)
         form.addRow(_("回测资金"), self.capital_line)
 
+        flags_grid: QtWidgets.QGridLayout = QtWidgets.QGridLayout()
+        flags_grid.addWidget(self.ban_short_box, 0, 0)
+        flags_grid.addWidget(self.trade_on_close_price_box, 0, 1)
+
         result_grid: QtWidgets.QGridLayout = QtWidgets.QGridLayout()
         result_grid.addWidget(self.trade_button, 0, 0)
         result_grid.addWidget(self.order_button, 0, 1)
@@ -170,6 +181,7 @@ class BacktesterManager(QtWidgets.QWidget):
 
         left_vbox: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
         left_vbox.addLayout(form)
+        left_vbox.addLayout(flags_grid)
         left_vbox.addWidget(backtesting_button)
         left_vbox.addWidget(downloading_button)
         left_vbox.addStretch()
@@ -210,7 +222,7 @@ class BacktesterManager(QtWidgets.QWidget):
         )
 
         # Candle Chart
-        self.candle_dialog: CandleChartDialog = CandleChartDialog()
+        self.candle_dialog: CandleChartDialog = CandleChartDialog_v2()
 
         # Layout
         middle_vbox: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
@@ -261,6 +273,8 @@ class BacktesterManager(QtWidgets.QWidget):
         self.size_line.setText(str(setting["size"]))
         self.pricetick_line.setText(str(setting["pricetick"]))
         self.capital_line.setText(str(setting["capital"]))
+        self.ban_short_box.setChecked(bool(setting["ban_short"]))
+        self.trade_on_close_price_box.setChecked(bool(setting["trade_on_close_price"]))
 
     def register_event(self) -> None:
         """"""
@@ -323,6 +337,8 @@ class BacktesterManager(QtWidgets.QWidget):
         size: float = float(self.size_line.text())
         pricetick: float = float(self.pricetick_line.text())
         capital: float = float(self.capital_line.text())
+        ban_short: bool = self.ban_short_box.isChecked()
+        trade_on_close_price: bool = self.trade_on_close_price_box.isChecked()
 
         # Check validity of vt_symbol
         if "." not in vt_symbol:
@@ -344,7 +360,9 @@ class BacktesterManager(QtWidgets.QWidget):
             "slippage": slippage,
             "size": size,
             "pricetick": pricetick,
-            "capital": capital
+            "capital": capital,
+            "ban_short": ban_short,
+            "trade_on_close_price": trade_on_close_price,
         }
         save_json(self.setting_filename, backtesting_setting)
 
@@ -369,6 +387,8 @@ class BacktesterManager(QtWidgets.QWidget):
             size,
             pricetick,
             capital,
+            ban_short,
+            trade_on_close_price,
             new_setting
         )
 
@@ -398,6 +418,8 @@ class BacktesterManager(QtWidgets.QWidget):
         size: float = float(self.size_line.text())
         pricetick: float = float(self.pricetick_line.text())
         capital: float = float(self.capital_line.text())
+        ban_short: bool = self.ban_short_box.isChecked()
+        trade_on_close_price: bool = self.trade_on_close_price_box.isChecked()
 
         parameters: dict = self.settings[class_name]
         dialog: OptimizationSettingEditor = OptimizationSettingEditor(class_name, parameters)
@@ -419,6 +441,8 @@ class BacktesterManager(QtWidgets.QWidget):
             size,
             pricetick,
             capital,
+            ban_short,
+            trade_on_close_price,
             optimization_setting,
             use_ga,
             max_workers
@@ -499,6 +523,9 @@ class BacktesterManager(QtWidgets.QWidget):
 
             trades: List[TradeData] = self.backtester_engine.get_all_trades()
             self.candle_dialog.update_trades(trades)
+
+            indicators: List[dict] = self.backtester_engine.get_indicators()
+            self.candle_dialog.update_indicators(indicators)
 
         self.candle_dialog.exec_()
 
@@ -812,7 +839,7 @@ class BacktesterChart(pg.GraphicsLayoutWidget):
         self.loss_pnl_bar.setOpts(x=loss_pnl_x, height=loss_pnl_height)
 
         # Set data for pnl distribution
-        hist, x = np.histogram(df["net_pnl"], bins="auto")
+        hist, x = np.histogram(df["net_pnl"], bins="doane")
         x = x[:-1]
         self.distribution_curve.setData(x, hist)
 
@@ -1401,6 +1428,209 @@ class CandleChartDialog(QtWidgets.QDialog):
         """"""
         return self.updated
 
+
+class CandleChartDialog_v2():
+    """"""
+    # 蜡烛图颜色
+
+    # 交易趋势线颜色
+    color_win = '#ff0000'
+    color_lost = '#00ff00'
+    color_buy = '#ffff00'
+    color_sell = '#ffff00'
+    color_short = '#ff00ff'
+    color_cover = '#ff00ff'
+    color_net = '#ffffff'
+
+    def __init__(self) -> None:
+        """"""
+        super().__init__()
+        self.updated: bool = False
+        self.bars = []
+        self.indicators: None|IndicatorStore = None
+        self.trade_pairs = []
+
+    def update_history(self, history: list) -> None:
+        """"""
+        self.updated = True
+        self.bars.extend(history)
+
+    def update_indicators(self, indicators: None|IndicatorStore) -> None:
+        """"""
+        if indicators is None:
+            self.indicators = None
+        elif self.indicators is None:
+            assert isinstance(indicators, IndicatorStore)
+            self.indicators = deepcopy(indicators)
+        else:
+            assert self.indicators.config == indicators.config
+            for name, values in self.indicators.data.items():
+                self.indicators.data[name].extend(values)
+
+    def update_trades(self, trades: list) -> None:
+        """"""
+        trade_pairs: list = generate_trade_pairs(trades)
+        self.trade_pairs.extend(trade_pairs)
+
+    def clear_data(self) -> None:
+        """"""
+        self.updated = False
+        self.bars.clear()
+        self.trade_pairs.clear()
+        self.indicators = None
+
+    def is_updated(self) -> bool:
+        """"""
+        return self.updated
+
+    def exec_(self):
+        widget = QtWidgets.QDialog()
+        widget.setWindowFlags(widget.windowFlags() | QtCore.Qt.WindowType.WindowMinMaxButtonsHint)
+        widget.setWindowTitle('回测K线图表')
+        layout = QVBoxLayout()
+        widget.setLayout(layout)
+
+        layout.setContentsMargins(0, 0, 0, 0)
+        widget.resize(1400, 800)
+        main_chart = QtChart(widget, inner_width=1, inner_height=1)
+        layout.addWidget(main_chart.get_webview())
+
+        # 如果存在指标，则需要多个图形，其中0号是主图
+        chart_dict = {'': main_chart}
+
+        if self.indicators is not None:
+            for ind_name, ind_cfg in self.indicators.config.items():
+                chart_name = ind_cfg.chart
+                if chart_name not in chart_dict:
+                    chart_dict[chart_name] = main_chart.create_subchart('bottom', 1., 0.3, sync=True)
+
+            # 设置多个图大小
+            sizes = [3] + [1] * (len(chart_dict)-1)
+            add_size = sum(sizes)
+            sizes = [s/add_size for s in sizes]
+            for s, chart_name, chart in zip(sizes, chart_dict.keys(), chart_dict.values(), strict=True):
+                # 设置图的位置和参数
+                chart.resize(1., s)
+                chart.legend(visible=True, text=chart_name, font_size=12, font_family='Verdana')
+                chart.layout(font_size=12, font_family='Verdana')
+                chart.precision(5)
+                # 设置风格
+                chart.candle_style(
+                    up_color='#ff3d3d00', down_color='#10cc55',
+                    border_up_color='#ff3d3d', border_down_color='#10cc55',
+                    wick_up_color='#ff3d3d', wick_down_color='#10cc55')
+
+                if chart_name == '':
+                    # 主图
+                    chart.price_line(True, False)
+                    chart.price_scale(visible=True, border_visible=False, scale_margin_top=0., scale_margin_bottom=0.1)
+                    chart.volume_config(up_color='#ff3d3d', down_color='#10cc55', scale_margin_top=0.9, scale_margin_bottom=0)
+                    chart.time_scale(min_bar_spacing=0.001, visible=True, seconds_visible=True)
+                else:
+                    # 非主图
+                    chart.price_line(False, False)
+                    chart.price_scale(visible=True, border_visible=False, scale_margin_top=0., scale_margin_bottom=0.)
+                    chart.volume_config(up_color='#ff3d3d', down_color='#10cc55', scale_margin_top=0, scale_margin_bottom=0)
+                    chart.time_scale(min_bar_spacing=0.001, visible=False, seconds_visible=False)
+
+        # 设置主图
+        code = self.bars[0].vt_symbol if len(self.bars) > 0 else ''
+
+        main_chart.topbar.textbox('code', code)
+        main_chart.topbar.textbox('label1', '红--- 盈利交易')
+        main_chart.topbar.textbox('label2', '绿--- 亏损交易')
+        main_chart.topbar.textbox('label3', '黄↑ 买入开仓')
+        main_chart.topbar.textbox('label4', '黄↓ 卖出平仓')
+        main_chart.topbar.textbox('label5', '紫↓ 卖出开仓')
+        main_chart.topbar.textbox('label6', '紫↑ 买入平仓')
+
+        ohlcv_df = {'time': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []}
+        for bar in self.bars:
+            ohlcv_df['time'].append(bar.datetime.replace(tzinfo=None))
+            ohlcv_df['open'].append(bar.open_price)
+            ohlcv_df['high'].append(bar.high_price)
+            ohlcv_df['low'].append(bar.low_price)
+            ohlcv_df['close'].append(bar.close_price)
+            ohlcv_df['volume'].append(bar.volume)
+
+        ohlcv_df = DataFrame(ohlcv_df)
+        main_chart.set(ohlcv_df)
+
+        # 设置主图的买卖线
+        for trade_pair in self.trade_pairs:
+            vol_str = f'[{trade_pair["volume"]}]'
+            trade_pair['open_dt'] = trade_pair['open_dt'].replace(tzinfo=None)
+            trade_pair['close_dt'] = trade_pair['close_dt'].replace(tzinfo=None)
+
+            if trade_pair['direction'] == Direction.LONG:
+                main_chart.marker(trade_pair['open_dt'], 'below', 'arrow_up', self.color_buy, vol_str)
+                main_chart.marker(trade_pair['close_dt'], 'above', 'arrow_down', self.color_sell, vol_str)
+
+                if trade_pair['close_price'] > trade_pair['open_price']:
+                    line_color = self.color_win
+                else:
+                    line_color = self.color_lost
+
+            elif trade_pair['direction'] == Direction.SHORT:
+                main_chart.marker(trade_pair['open_dt'], 'above', 'arrow_down', self.color_short, vol_str)
+                main_chart.marker(trade_pair['close_dt'], 'below', 'arrow_up', self.color_cover, vol_str)
+
+                if trade_pair['close_price'] < trade_pair['open_price']:
+                    line_color = self.color_win
+                else:
+                    line_color = self.color_lost
+
+            else:
+                main_chart.marker(trade_pair['open_dt'], 'inside', 'circle', self.color_net, vol_str)
+                main_chart.marker(trade_pair['close_dt'], 'inside', 'circle', self.color_net, vol_str)
+
+                line_color = self.color_net
+
+            main_chart.trend_line(trade_pair['open_dt'], trade_pair['open_price'],
+                             trade_pair['close_dt'], trade_pair['close_price'],
+                             False, line_color, 2, 'dashed')
+
+        # 设置指标
+        if self.indicators is not None:
+            # 因为 mark 必须要有k线图才能显示，所以使用了mark的，都加上裸k线，没有成交量
+            has_set_k = set([''])
+            ohlc_df = ohlcv_df.drop(columns=['volume'])
+
+            for ind_name, ind_cfg in self.indicators.config.items():
+                ind_cfg: IndicatorConfig
+                ind_data = self.indicators.data[ind_name]
+                chart = chart_dict[ind_cfg.chart]
+                ind_show_name = ind_cfg.display_name    # 指标显示的名称
+
+                if ind_cfg.type == 'line':
+                    df = DataFrame(ind_data, columns=[ind_show_name])
+                    assert len(df[ind_show_name]) == len(ohlcv_df['time']), '错误！需要确保指标数量与时间戳数量一致'
+
+                    df['time'] = ohlcv_df['time']
+
+                    color = ind_cfg.color
+                    thick = ind_cfg.line_thick
+                    style = ind_cfg.line_style
+
+                    line = chart.create_line(ind_show_name, color, style=style, width=thick, price_line=False, price_label=False)
+                    line.set(df)
+                    line.precision(5)
+                    if ind_cfg.visable:
+                        line.show_data()
+                    else:
+                        line.hide_data()
+
+                elif ind_cfg.type == 'mark':
+                    if ind_cfg.chart not in has_set_k:
+                        has_set_k.add(ind_cfg.chart)
+                        chart.set(ohlc_df, keep_drawings=True)
+
+                    for t, m in zip(ohlcv_df['time'], ind_data, strict=True):
+                        m: IndicatorMarkItem | None
+                        if m is not None:
+                            chart.marker(t, m.position, m.shape, m.color, m.text)
+
+        widget.exec_()
 
 def generate_trade_pairs(trades: list) -> list:
     """"""

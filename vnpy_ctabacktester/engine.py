@@ -152,6 +152,8 @@ class BacktesterEngine(BaseEngine):
         size: int,
         pricetick: float,
         capital: int,
+        ban_short: bool,
+        trade_on_close_price: bool,
         setting: dict
     ) -> None:
         """"""
@@ -176,7 +178,9 @@ class BacktesterEngine(BaseEngine):
             size=size,
             pricetick=pricetick,
             capital=capital,
-            mode=mode
+            mode=mode,
+            ban_short=ban_short,
+            trade_on_close_price=trade_on_close_price,
         )
 
         strategy_class: type = self.classes[class_name]
@@ -222,9 +226,11 @@ class BacktesterEngine(BaseEngine):
         size: int,
         pricetick: float,
         capital: int,
+        ban_short: bool,
+        trade_on_close_price: bool,
         setting: dict
     ) -> bool:
-        if self.thread:
+        if self.thread and self.thread.is_alive():
             self.write_log(_("已有任务在运行中，请等待完成"))
             return False
 
@@ -242,6 +248,8 @@ class BacktesterEngine(BaseEngine):
                 size,
                 pricetick,
                 capital,
+                ban_short,
+                trade_on_close_price,
                 setting
             )
         )
@@ -278,6 +286,8 @@ class BacktesterEngine(BaseEngine):
         size: int,
         pricetick: float,
         capital: int,
+        ban_short: bool,
+        trade_on_close_price: bool,
         optimization_setting: OptimizationSetting,
         use_ga: bool,
         max_workers: int
@@ -303,6 +313,8 @@ class BacktesterEngine(BaseEngine):
             size=size,
             pricetick=pricetick,
             capital=capital,
+            ban_short=ban_short,
+            trade_on_close_price=trade_on_close_price,
             mode=mode
         )
 
@@ -349,6 +361,8 @@ class BacktesterEngine(BaseEngine):
         size: int,
         pricetick: float,
         capital: int,
+        ban_short: bool,
+        trade_on_close_price: bool,
         optimization_setting: OptimizationSetting,
         use_ga: bool,
         max_workers: int
@@ -371,6 +385,8 @@ class BacktesterEngine(BaseEngine):
                 size,
                 pricetick,
                 capital,
+                ban_short,
+                trade_on_close_price,
                 optimization_setting,
                 use_ga,
                 max_workers
@@ -478,6 +494,9 @@ class BacktesterEngine(BaseEngine):
     def get_history_data(self) -> list:
         """"""
         return self.backtesting_engine.history_data
+
+    def get_indicators(self) -> list:
+        return self.backtesting_engine.get_indicators()
 
     def get_strategy_class_file(self, class_name: str) -> str:
         """"""

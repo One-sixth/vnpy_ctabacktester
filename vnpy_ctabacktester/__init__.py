@@ -21,6 +21,10 @@
 # SOFTWARE.
 
 
+# 要先导入才行，不能在 qt执行的函数里再导入qt库
+import lightweight_charts
+#
+
 from pathlib import Path
 import importlib_metadata
 from vnpy.trader.app import BaseApp
