@@ -12,7 +12,7 @@ from typing import Optional
 
 from vnpy.event import Event, EventEngine
 from vnpy.trader.engine import BaseEngine, MainEngine
-from vnpy.trader.constant import Interval
+from vnpy.trader.constant import Interval, Dividend
 from vnpy.trader.utility import extract_vt_symbol
 from vnpy.trader.object import HistoryRequest, TickData, ContractData, BarData
 from vnpy.trader.datafeed import BaseDatafeed, get_datafeed
@@ -145,6 +145,7 @@ class BacktesterEngine(BaseEngine):
         class_name: str,
         vt_symbol: str,
         interval: str,
+        dividend: str,
         start: datetime,
         end: datetime,
         rate: float,
@@ -171,6 +172,7 @@ class BacktesterEngine(BaseEngine):
         engine.set_parameters(
             vt_symbol=vt_symbol,
             interval=interval,
+            dividend=dividend,
             start=start,
             end=end,
             rate=rate,
@@ -219,6 +221,7 @@ class BacktesterEngine(BaseEngine):
         class_name: str,
         vt_symbol: str,
         interval: str,
+        dividend: str,
         start: datetime,
         end: datetime,
         rate: float,
@@ -241,6 +244,7 @@ class BacktesterEngine(BaseEngine):
                 class_name,
                 vt_symbol,
                 interval,
+                dividend,
                 start,
                 end,
                 rate,
@@ -279,6 +283,7 @@ class BacktesterEngine(BaseEngine):
         class_name: str,
         vt_symbol: str,
         interval: str,
+        dividend: str,
         start: datetime,
         end: datetime,
         rate: float,
@@ -306,6 +311,7 @@ class BacktesterEngine(BaseEngine):
         engine.set_parameters(
             vt_symbol=vt_symbol,
             interval=interval,
+            dividend=dividend,
             start=start,
             end=end,
             rate=rate,
@@ -354,6 +360,7 @@ class BacktesterEngine(BaseEngine):
         class_name: str,
         vt_symbol: str,
         interval: str,
+        dividend: str,
         start: datetime,
         end: datetime,
         rate: float,
@@ -378,6 +385,7 @@ class BacktesterEngine(BaseEngine):
                 class_name,
                 vt_symbol,
                 interval,
+                dividend,
                 start,
                 end,
                 rate,
@@ -420,7 +428,8 @@ class BacktesterEngine(BaseEngine):
             exchange=exchange,
             interval=Interval(interval),
             start=start,
-            end=end
+            end=end,
+            dividend=Dividend.NONE,
         )
 
         try:

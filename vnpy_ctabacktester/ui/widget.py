@@ -5,6 +5,7 @@ from copy import copy
 from typing import List, Tuple
 from lightweight_charts.widgets import QtChart
 import random
+from uuid import uuid1
 from qtpy.QtWidgets import QVBoxLayout
 
 import numpy as np
@@ -12,14 +13,14 @@ import pyqtgraph as pg
 from pandas import DataFrame
 from copy import deepcopy
 
-from vnpy.trader.constant import Interval, Direction, Exchange
+from vnpy.trader.constant import Interval, Direction, Exchange, Dividend
 from vnpy.trader.engine import MainEngine, BaseEngine
 from vnpy.trader.ui import QtCore, QtWidgets, QtGui
-from vnpy.trader.ui.widget import BaseMonitor, BaseCell, DirectionCell, EnumCell
+from vnpy.trader.ui.widget import BaseMonitor, BaseCell, DirectionCell, EnumCell, PnlCell
 from vnpy.event import Event, EventEngine
 from vnpy.chart import ChartWidget, CandleItem, VolumeItem
 from vnpy.trader.utility import load_json, save_json
-from vnpy.trader.object import BarData, TradeData, OrderData
+from vnpy.trader.object import BarData, TradeData, OrderData, TickData
 from vnpy.trader.database import DB_TZ
 from vnpy_ctastrategy.backtesting import DailyResult
 from vnpy_ctastrategy.base import IndicatorStore, IndicatorConfig, IndicatorMarkItem
@@ -32,6 +33,23 @@ from ..engine import (
     EVENT_BACKTESTER_OPTIMIZATION_FINISHED,
     OptimizationSetting
 )
+
+
+TICK_BAR_MODE = {
+    '1sec': 1,
+    '2sec': 2,
+    '3sec': 3,
+    '4sec': 4,
+    '5sec': 5,
+    '6sec': 6,
+    '10sec': 10,
+    '12sec': 12,
+    '15sec': 15,
+    '20sec': 20,
+    '30sec': 30
+}
+
+DIVIDEND_MODE = [e.value for e in Dividend]
 
 
 class BacktesterManager(QtWidgets.QWidget):
@@ -85,6 +103,17 @@ class BacktesterManager(QtWidgets.QWidget):
         self.interval_combo: QtWidgets.QComboBox = QtWidgets.QComboBox()
         for interval in Interval:
             self.interval_combo.addItem(interval.value)
+
+        self.tick_bar_mode_combo: QtWidgets.QComboBox = QtWidgets.QComboBox()
+        for mode in TICK_BAR_MODE:
+            self.tick_bar_mode_combo.addItem(mode)
+
+        enable_tick_combo_func = lambda: self.tick_bar_mode_combo.setEnabled(self.interval_combo.currentText() == Interval.TICK.value)
+        self.interval_combo.currentTextChanged.connect(enable_tick_combo_func)
+
+        self.dividend_combo: QtWidgets.QComboBox = QtWidgets.QComboBox()
+        for mode in DIVIDEND_MODE:
+            self.dividend_combo.addItem(mode)
 
         end_dt: datetime = datetime.now()
         start_dt: datetime = end_dt - timedelta(days=3 * 365)
@@ -161,6 +190,8 @@ class BacktesterManager(QtWidgets.QWidget):
         form.addRow(_("交易策略"), self.class_combo)
         form.addRow(_("本地代码"), self.symbol_line)
         form.addRow(_("K线周期"), self.interval_combo)
+        form.addRow(_("TickBar模式"),self.tick_bar_mode_combo)
+        form.addRow(_("复权模式"),self.dividend_combo)
         form.addRow(_("开始日期"), self.start_date_edit)
         form.addRow(_("结束日期"), self.end_date_edit)
         form.addRow(_("手续费率"), self.rate_line)
@@ -197,6 +228,8 @@ class BacktesterManager(QtWidgets.QWidget):
         self.statistics_monitor: StatisticsMonitor = StatisticsMonitor()
 
         self.log_monitor: QtWidgets.QTextEdit = QtWidgets.QTextEdit()
+        # 更新时自动拖动到最下面
+        self.log_monitor.textChanged.connect(lambda: self.log_monitor.moveCursor(QtGui.QTextCursor.MoveOperation.End))
 
         self.chart: BacktesterChart = BacktesterChart()
         chart: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
@@ -222,7 +255,7 @@ class BacktesterManager(QtWidgets.QWidget):
         )
 
         # Candle Chart
-        self.candle_dialog: CandleChartDialog = CandleChartDialog_v2()
+        self.candle_dialog: CandleChartDialog_v2 = CandleChartDialog_v2()
 
         # Layout
         middle_vbox: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
@@ -263,10 +296,29 @@ class BacktesterManager(QtWidgets.QWidget):
             self.interval_combo.findText(setting["interval"])
         )
 
+        tick_bar_mode: str = setting.get("tick_bar_mode", "")
+        if tick_bar_mode:
+            self.tick_bar_mode_combo.setCurrentIndex(
+                self.tick_bar_mode_combo.findText(tick_bar_mode)
+            )
+            if self.interval_combo.currentText() != Interval.TICK.value:
+                self.tick_bar_mode_combo.setEnabled(False)
+
+        dividend: str = setting.get("dividend", "")
+        if dividend in DIVIDEND_MODE:
+            self.dividend_combo.setCurrentIndex(
+                self.dividend_combo.findText(dividend)
+            )
+
         start_str: str = setting.get("start", "")
         if start_str:
             start_dt: QtCore.QDate = QtCore.QDate.fromString(start_str, "yyyy-MM-dd")
             self.start_date_edit.setDate(start_dt)
+
+        end_str: str = setting.get("end", "")
+        if end_str:
+            end_dt: QtCore.QDate = QtCore.QDate.fromString(end_str, "yyyy-MM-dd")
+            self.end_date_edit.setDate(end_dt)
 
         self.rate_line.setText(str(setting["rate"]))
         self.slippage_line.setText(str(setting["slippage"]))
@@ -313,8 +365,9 @@ class BacktesterManager(QtWidgets.QWidget):
 
         # Tick data can not be displayed using candle chart
         interval: str = self.interval_combo.currentText()
-        if interval != Interval.TICK.value:
-            self.candle_button.setEnabled(True)
+
+        # if interval != Interval.TICK.value:
+        self.candle_button.setEnabled(True)
 
     def process_optimization_finished_event(self, event: Event) -> None:
         """"""
@@ -330,6 +383,8 @@ class BacktesterManager(QtWidgets.QWidget):
 
         vt_symbol: str = self.symbol_line.text()
         interval: str = self.interval_combo.currentText()
+        tick_bar_mode: str = self.tick_bar_mode_combo.currentText()
+        dividend: str = self.dividend_combo.currentText()
         start: datetime = self.start_date_edit.dateTime().toPython()
         end: datetime = self.end_date_edit.dateTime().toPython()
         rate: float = float(self.rate_line.text())
@@ -355,7 +410,10 @@ class BacktesterManager(QtWidgets.QWidget):
             "class_name": class_name,
             "vt_symbol": vt_symbol,
             "interval": interval,
+            "tick_bar_mode": tick_bar_mode,
+            "dividend": dividend,
             "start": start.strftime("%Y-%m-%d"),
+            "end": end.strftime("%Y-%m-%d"),
             "rate": rate,
             "slippage": slippage,
             "size": size,
@@ -380,6 +438,7 @@ class BacktesterManager(QtWidgets.QWidget):
             class_name,
             vt_symbol,
             interval,
+            dividend,
             start,
             end,
             rate,
@@ -411,6 +470,7 @@ class BacktesterManager(QtWidgets.QWidget):
         class_name: str = self.class_combo.currentText()
         vt_symbol: str = self.symbol_line.text()
         interval: str = self.interval_combo.currentText()
+        dividend: str = self.dividend_combo.currentText()
         start: object = self.start_date_edit.dateTime().toPython()
         end: object = self.end_date_edit.dateTime().toPython()
         rate: float = float(self.rate_line.text())
@@ -434,6 +494,7 @@ class BacktesterManager(QtWidgets.QWidget):
             class_name,
             vt_symbol,
             interval,
+            dividend,
             start,
             end,
             rate,
@@ -452,6 +513,14 @@ class BacktesterManager(QtWidgets.QWidget):
 
     def start_downloading(self) -> None:
         """"""
+        # 要求使用 datamanager 来下载数据，而不是在这里下载，使用对话框提示
+        QtWidgets.QMessageBox.information(
+            None, '信息', '功能已禁用\n请使用DataManager下载数据',
+            QtWidgets.QMessageBox.StandardButton.Yes, QtWidgets.QMessageBox.StandardButton.Yes
+        )
+        return
+        #
+
         vt_symbol: str = self.symbol_line.text()
         interval: str = self.interval_combo.currentText()
         start_date: QtCore.QDate = self.start_date_edit.date()
@@ -526,6 +595,12 @@ class BacktesterManager(QtWidgets.QWidget):
 
             indicators: List[dict] = self.backtester_engine.get_indicators()
             self.candle_dialog.update_indicators(indicators)
+
+            interval: str = self.interval_combo.currentText()
+            if interval == Interval.TICK.value:
+                self.candle_dialog.set_tick_mode(self.tick_bar_mode_combo.currentText())
+            else:
+                self.candle_dialog.set_tick_mode(None)
 
         self.candle_dialog.exec_()
 
@@ -1150,10 +1225,10 @@ class DailyResultMonitor(BaseMonitor):
         "turnover": {"display": _("成交额"), "cell": FloatCell, "update": False},
         "commission": {"display": _("手续费"), "cell": FloatCell, "update": False},
         "slippage": {"display": _("滑点"), "cell": FloatCell, "update": False},
-        "trading_pnl": {"display": _("交易盈亏"), "cell": FloatCell, "update": False},
-        "holding_pnl": {"display": _("持仓盈亏"), "cell": FloatCell, "update": False},
-        "total_pnl": {"display": _("总盈亏"), "cell": FloatCell, "update": False},
-        "net_pnl": {"display": _("净盈亏"), "cell": FloatCell, "update": False},
+        "trading_pnl": {"display": _("交易盈亏"), "cell": PnlCell, "update": False},
+        "holding_pnl": {"display": _("持仓盈亏"), "cell": PnlCell, "update": False},
+        "total_pnl": {"display": _("总盈亏"), "cell": PnlCell, "update": False},
+        "net_pnl": {"display": _("净盈亏"), "cell": PnlCell, "update": False},
     }
 
 
@@ -1182,7 +1257,8 @@ class BacktestingResultDialog(QtWidgets.QDialog):
     def init_ui(self) -> None:
         """"""
         self.setWindowTitle(self.title)
-        self.resize(1100, 600)
+        self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowType.WindowMinMaxButtonsHint)
+        self.resize(1400, 800)
 
         self.table: QtWidgets.QTableWidget = self.table_class(self.main_engine, self.event_engine)
 
@@ -1207,6 +1283,13 @@ class BacktestingResultDialog(QtWidgets.QDialog):
     def is_updated(self) -> bool:
         """"""
         return self.updated
+
+    def exec_(self):
+        # 如果支持调整列宽，则自动调整
+        resize_columns_func = getattr(self.table, 'resize_columns', None)
+        if resize_columns_func is not None:
+            resize_columns_func()
+        super().exec_()
 
 
 class CandleChartDialog(QtWidgets.QDialog):
@@ -1448,7 +1531,13 @@ class CandleChartDialog_v2():
         self.updated: bool = False
         self.bars = []
         self.indicators: None|IndicatorStore = None
-        self.trade_pairs = []
+        self.trades = []
+        self.tick_mode = False
+        self._window_refs = {}
+
+    def set_tick_mode(self, mode):
+        assert mode is None or mode in TICK_BAR_MODE
+        self.tick_mode = mode
 
     def update_history(self, history: list) -> None:
         """"""
@@ -1469,37 +1558,147 @@ class CandleChartDialog_v2():
 
     def update_trades(self, trades: list) -> None:
         """"""
-        trade_pairs: list = generate_trade_pairs(trades)
-        self.trade_pairs.extend(trade_pairs)
+        self.trades.extend(trades)
 
     def clear_data(self) -> None:
         """"""
         self.updated = False
         self.bars.clear()
-        self.trade_pairs.clear()
+        self.trades.clear()
         self.indicators = None
 
     def is_updated(self) -> bool:
         """"""
         return self.updated
 
+    def _close_win(self, obj):
+        del self._window_refs[obj.objectName()]
+
     def exec_(self):
+
+        # 准备数据
+        precision = 5
+
+        # 获得K线数据
+        bars = deepcopy(self.bars)
+
+        # 清除时区
+        for bar in bars:
+            bar: TickData|BarData
+            bar.datetime = bar.datetime.replace(tzinfo=None)
+
+        # 获得交易对
+        trades = deepcopy(self.trades)
+        # 清除时区
+        for trade in trades:
+            trade: TradeData
+            trade.datetime = trade.datetime.replace(tzinfo=None)
+
+        trade_pairs: list = generate_trade_pairs(trades)
+
+        # 获得指标
+        indicators = self.indicators
+
+        # ----------------------------------------------------------------------
+
+        # 准备K线数据
+        ohlcv_df = {'time': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': [], 'open_int': []}
+
+        if self.tick_mode is not None:
+            # 如果是 tick 模式
+            bar_seconds = TICK_BAR_MODE[self.tick_mode]
+
+            last_vol = None
+            tick_time = []
+            tick_price = []
+            tick_vol = []
+            tick_open_int = []
+
+            for bar in bars:
+                assert isinstance(bar, TickData)
+                if last_vol is None or last_vol > bar.volume:
+                    last_vol = bar.volume
+                add_vol = bar.volume - last_vol
+                last_vol = bar.volume
+
+                tick_time.append(bar.datetime)
+                tick_price.append(bar.last_price)
+                tick_vol.append(add_vol)
+                tick_open_int.append(bar.open_interest)
+
+            tick2bar_times, keeps, tick_bar_dict = collapse_tick_to_seccond(
+                tick_time, tick_price, tick_vol, tick_open_int, bar_seconds
+            )
+
+            for nt in sorted(tick_bar_dict):
+                nbar = tick_bar_dict[nt]
+                ohlcv_df['time'].append(nt)
+                ohlcv_df['open'].append(nbar['open'])
+                ohlcv_df['high'].append(nbar['high'])
+                ohlcv_df['low'].append(nbar['low'])
+                ohlcv_df['close'].append(nbar['close'])
+                ohlcv_df['volume'].append(nbar['vol'])
+                ohlcv_df['open_int'].append(nbar['open_int'])
+
+            tick2bar_times_map = dict(zip(tick_time, tick2bar_times))
+            # 刷新 trade_pairs 的时间
+            for pair in trade_pairs:
+                pair['open_dt'] = tick2bar_times_map[pair['open_dt']]
+                pair['close_dt'] = tick2bar_times_map[pair['close_dt']]
+
+            # 刷新 ind
+            if indicators is not None:
+                indicators = copy(indicators)
+                new_data = {}
+                for ind_name, ind_data in indicators.data.items():
+                    new_data[ind_name] = np.asarray(ind_data, np.object_)[keeps].tolist()
+                indicators.data = new_data
+
+        else:
+            # 如果是 bar 模式
+            for bar in bars:
+                ohlcv_df['time'].append(bar.datetime)
+                ohlcv_df['open'].append(bar.open_price)
+                ohlcv_df['high'].append(bar.high_price)
+                ohlcv_df['low'].append(bar.low_price)
+                ohlcv_df['close'].append(bar.close_price)
+                ohlcv_df['volume'].append(bar.volume)
+                ohlcv_df['open_int'].append(bar.open_interest)
+
+        ohlcv_df = DataFrame(ohlcv_df)
+
+        # 准备结束
+
+        # -----------------------------------------------------------------------------
+
+        # 设定窗口，要一个非模态窗口
         widget = QtWidgets.QDialog()
+
+        # 记录下该窗口，避免因为没有引用而被销毁
+        wid = str(uuid1())
+        widget.setObjectName(wid)
+        self._window_refs[wid] = widget
+
+        # 设定窗口属性
+        widget.destroyed.connect(self._close_win)
+        widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)     # 设定窗口关闭后就自动销毁
         widget.setWindowFlags(widget.windowFlags() | QtCore.Qt.WindowType.WindowMinMaxButtonsHint)
         widget.setWindowTitle('回测K线图表')
         layout = QVBoxLayout()
         widget.setLayout(layout)
-
         layout.setContentsMargins(0, 0, 0, 0)
         widget.resize(1400, 800)
+
+        # 加入 QtChart 部件
         main_chart = QtChart(widget, inner_width=1, inner_height=1)
         layout.addWidget(main_chart.get_webview())
 
         # 如果存在指标，则需要多个图形，其中0号是主图
         chart_dict = {'': main_chart}
 
-        if self.indicators is not None:
-            for ind_name, ind_cfg in self.indicators.config.items():
+
+        if indicators is not None:
+            for ind_name, ind_cfg in indicators.config.items():
                 chart_name = ind_cfg.chart
                 if chart_name not in chart_dict:
                     chart_dict[chart_name] = main_chart.create_subchart('bottom', 1., 0.3, sync=True)
@@ -1513,7 +1712,7 @@ class CandleChartDialog_v2():
                 chart.resize(1., s)
                 chart.legend(visible=True, text=chart_name, font_size=12, font_family='Verdana')
                 chart.layout(font_size=12, font_family='Verdana')
-                chart.precision(5)
+                chart.precision(precision)
                 # 设置风格
                 chart.candle_style(
                     up_color='#ff3d3d00', down_color='#10cc55',
@@ -1525,16 +1724,16 @@ class CandleChartDialog_v2():
                     chart.price_line(True, False)
                     chart.price_scale(visible=True, border_visible=False, scale_margin_top=0., scale_margin_bottom=0.1)
                     chart.volume_config(up_color='#ff3d3d', down_color='#10cc55', scale_margin_top=0.9, scale_margin_bottom=0)
-                    chart.time_scale(min_bar_spacing=0.001, visible=True, seconds_visible=True)
+                    chart.time_scale(min_bar_spacing=0., visible=True, seconds_visible=True)
                 else:
                     # 非主图
                     chart.price_line(False, False)
                     chart.price_scale(visible=True, border_visible=False, scale_margin_top=0., scale_margin_bottom=0.)
                     chart.volume_config(up_color='#ff3d3d', down_color='#10cc55', scale_margin_top=0, scale_margin_bottom=0)
-                    chart.time_scale(min_bar_spacing=0.001, visible=False, seconds_visible=False)
+                    chart.time_scale(min_bar_spacing=0., visible=False, seconds_visible=False)
 
         # 设置主图
-        code = self.bars[0].vt_symbol if len(self.bars) > 0 else ''
+        code = bars[0].vt_symbol if len(bars) > 0 else ''
 
         main_chart.topbar.textbox('code', code)
         main_chart.topbar.textbox('label1', '红--- 盈利交易')
@@ -1544,20 +1743,10 @@ class CandleChartDialog_v2():
         main_chart.topbar.textbox('label5', '紫↓ 卖出开仓')
         main_chart.topbar.textbox('label6', '紫↑ 买入平仓')
 
-        ohlcv_df = {'time': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []}
-        for bar in self.bars:
-            ohlcv_df['time'].append(bar.datetime.replace(tzinfo=None))
-            ohlcv_df['open'].append(bar.open_price)
-            ohlcv_df['high'].append(bar.high_price)
-            ohlcv_df['low'].append(bar.low_price)
-            ohlcv_df['close'].append(bar.close_price)
-            ohlcv_df['volume'].append(bar.volume)
-
-        ohlcv_df = DataFrame(ohlcv_df)
         main_chart.set(ohlcv_df)
 
         # 设置主图的买卖线
-        for trade_pair in self.trade_pairs:
+        for trade_pair in trade_pairs:
             vol_str = f'[{trade_pair["volume"]}]'
             trade_pair['open_dt'] = trade_pair['open_dt'].replace(tzinfo=None)
             trade_pair['close_dt'] = trade_pair['close_dt'].replace(tzinfo=None)
@@ -1591,14 +1780,14 @@ class CandleChartDialog_v2():
                              False, line_color, 2, 'dashed')
 
         # 设置指标
-        if self.indicators is not None:
+        if indicators is not None:
             # 因为 mark 必须要有k线图才能显示，所以使用了mark的，都加上裸k线，没有成交量
             has_set_k = set([''])
             ohlc_df = ohlcv_df.drop(columns=['volume'])
 
-            for ind_name, ind_cfg in self.indicators.config.items():
+            for ind_name, ind_cfg in indicators.config.items():
                 ind_cfg: IndicatorConfig
-                ind_data = self.indicators.data[ind_name]
+                ind_data = indicators.data[ind_name]
                 chart = chart_dict[ind_cfg.chart]
                 ind_show_name = ind_cfg.display_name    # 指标显示的名称
 
@@ -1614,7 +1803,7 @@ class CandleChartDialog_v2():
 
                     line = chart.create_line(ind_show_name, color, style=style, width=thick, price_line=False, price_label=False)
                     line.set(df)
-                    line.precision(5)
+                    line.precision(precision)
                     if ind_cfg.visable:
                         line.show_data()
                     else:
@@ -1625,12 +1814,17 @@ class CandleChartDialog_v2():
                         has_set_k.add(ind_cfg.chart)
                         chart.set(ohlc_df, keep_drawings=True)
 
+                    marker_list = []
                     for t, m in zip(ohlcv_df['time'], ind_data, strict=True):
                         m: IndicatorMarkItem | None
                         if m is not None:
-                            chart.marker(t, m.position, m.shape, m.color, m.text)
+                            d = {"time": t, "position": m.position, "shape": m.shape, "color": m.color, "text": m.text}
+                            marker_list.append(d)
+                    chart.marker_list(marker_list)
 
-        widget.exec_()
+        widget.show()
+        widget.activateWindow()
+        # widget.exec_()
 
 def generate_trade_pairs(trades: list) -> list:
     """"""
@@ -1672,3 +1866,62 @@ def generate_trade_pairs(trades: list) -> list:
             same_direction.append(trade)
 
     return trade_pairs
+
+
+def collapse_tick_to_seccond(tick_times: list[datetime], tick_price, tick_vol, tick_open_int, second_interval=1):
+    '''
+    把tick时间折叠到秒
+    '''
+    assert 60 % second_interval == 0
+    assert len(tick_times) == len(tick_price) == len(tick_vol) == len(tick_open_int)
+
+    new_times = []
+    for t in tick_times:
+        t: datetime
+        sec_pad = second_interval - t.second % second_interval
+        if sec_pad == second_interval and t.microsecond == 0:
+            sec_pad = 0
+        add_td = timedelta(seconds=sec_pad)
+
+        nt = t.replace(microsecond=0) + add_td
+        new_times.append(nt)
+
+    keeps = [False] * len(new_times)
+    keeps[-1] = True
+
+    tmp_bar = {'open': None, 'high': -np.inf, 'low': np.inf, 'close': None, 'vol': 0, 'open_int': 0}
+
+    bar_dict = {}
+
+    for idx in range(len(new_times))[::-1]:
+        if idx != len(new_times)-1 and new_times[idx] == new_times[idx+1]:
+            keeps[idx] = False
+            d = bar_dict[new_times[idx]]
+
+        else:
+            keeps[idx] = True
+            d = bar_dict.setdefault(new_times[idx], tmp_bar.copy())
+
+        d['open'] = tick_price[idx]
+        d['high'] = max(tick_price[idx], d['high'])
+        d['low'] = min(tick_price[idx], d['low'])
+        if d['close'] is None:
+            d['close'] = tick_price[idx]
+            d['open_int'] = tick_open_int[idx]
+            d['vol'] = tick_vol[idx]
+
+    # 调整 tick_vol 到正确的 bar_vol
+    sorted_times = sorted(list(bar_dict))
+    for tidx, t in list(enumerate(sorted_times))[::-1]:
+        if tidx == 0:
+            # 第一个bar，保留原样
+            continue
+        cur_bar = bar_dict[t]
+        before_bar = bar_dict[sorted_times[tidx-1]]
+        if before_bar['vol'] < cur_bar['vol']:
+            cur_bar['vol'] = cur_bar['vol'] - before_bar['vol']
+        else:
+            # 跨日，保留原样
+            pass
+
+    return new_times, keeps, bar_dict
