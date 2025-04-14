@@ -1633,12 +1633,21 @@ class CandleChartDialog_v2():
             for nt in sorted(tick_bar_dict):
                 nbar = tick_bar_dict[nt]
                 ohlcv_df['time'].append(nt)
-                ohlcv_df['open'].append(nbar['open'])
-                ohlcv_df['high'].append(nbar['high'])
-                ohlcv_df['low'].append(nbar['low'])
-                ohlcv_df['close'].append(nbar['close'])
-                ohlcv_df['volume'].append(nbar['vol'])
-                ohlcv_df['open_int'].append(nbar['open_int'])
+                if nbar['open'] == nbar['high'] == nbar['low'] == nbar['close'] == nbar['vol'] == nbar['open_int'] == 0.:
+                    # 如果是盘前竞价时的tick，则设定为nan
+                    ohlcv_df['open'].append(np.nan)
+                    ohlcv_df['high'].append(np.nan)
+                    ohlcv_df['low'].append(np.nan)
+                    ohlcv_df['close'].append(np.nan)
+                    ohlcv_df['volume'].append(np.nan)
+                    ohlcv_df['open_int'].append(np.nan)
+                else:
+                    ohlcv_df['open'].append(nbar['open'])
+                    ohlcv_df['high'].append(nbar['high'])
+                    ohlcv_df['low'].append(nbar['low'])
+                    ohlcv_df['close'].append(nbar['close'])
+                    ohlcv_df['volume'].append(nbar['vol'])
+                    ohlcv_df['open_int'].append(nbar['open_int'])
 
             tick2bar_times_map = dict(zip(tick_time, tick2bar_times))
             # 刷新 trade_pairs 的时间
@@ -1695,7 +1704,7 @@ class CandleChartDialog_v2():
 
         # 如果存在指标，则需要多个图形，其中0号是主图
         chart_dict = {'': main_chart}
-
+        # ----------------------------------
 
         if indicators is not None:
             for ind_name, ind_cfg in indicators.config.items():
@@ -1746,14 +1755,18 @@ class CandleChartDialog_v2():
         main_chart.set(ohlcv_df)
 
         # 设置主图的买卖线
+        trade_marker_list = []
+
         for trade_pair in trade_pairs:
             vol_str = f'[{trade_pair["volume"]}]'
             trade_pair['open_dt'] = trade_pair['open_dt'].replace(tzinfo=None)
             trade_pair['close_dt'] = trade_pair['close_dt'].replace(tzinfo=None)
 
             if trade_pair['direction'] == Direction.LONG:
-                main_chart.marker(trade_pair['open_dt'], 'below', 'arrow_up', self.color_buy, vol_str)
-                main_chart.marker(trade_pair['close_dt'], 'above', 'arrow_down', self.color_sell, vol_str)
+                trade_marker_list.append({"time": trade_pair['open_dt'], "position": 'below', "shape": 'arrow_up', "color": self.color_buy, "text": vol_str})
+                trade_marker_list.append({"time": trade_pair['close_dt'], "position": 'above', "shape": 'arrow_down', "color": self.color_sell, "text": vol_str})
+                # main_chart.marker(trade_pair['open_dt'], 'below', 'arrow_up', self.color_buy, vol_str)
+                # main_chart.marker(trade_pair['close_dt'], 'above', 'arrow_down', self.color_sell, vol_str)
 
                 if trade_pair['close_price'] > trade_pair['open_price']:
                     line_color = self.color_win
@@ -1761,8 +1774,10 @@ class CandleChartDialog_v2():
                     line_color = self.color_lost
 
             elif trade_pair['direction'] == Direction.SHORT:
-                main_chart.marker(trade_pair['open_dt'], 'above', 'arrow_down', self.color_short, vol_str)
-                main_chart.marker(trade_pair['close_dt'], 'below', 'arrow_up', self.color_cover, vol_str)
+                trade_marker_list.append({"time": trade_pair['open_dt'], "position": 'above', "shape": 'arrow_down', "color": self.color_short, "text": vol_str})
+                trade_marker_list.append({"time": trade_pair['close_dt'], "position": 'below', "shape": 'arrow_up', "color": self.color_cover, "text": vol_str})
+                # main_chart.marker(trade_pair['open_dt'], 'above', 'arrow_down', self.color_short, vol_str)
+                # main_chart.marker(trade_pair['close_dt'], 'below', 'arrow_up', self.color_cover, vol_str)
 
                 if trade_pair['close_price'] < trade_pair['open_price']:
                     line_color = self.color_win
@@ -1770,14 +1785,19 @@ class CandleChartDialog_v2():
                     line_color = self.color_lost
 
             else:
-                main_chart.marker(trade_pair['open_dt'], 'inside', 'circle', self.color_net, vol_str)
-                main_chart.marker(trade_pair['close_dt'], 'inside', 'circle', self.color_net, vol_str)
+                trade_marker_list.append({"time": trade_pair['open_dt'], "position": 'inside', "shape": 'circle', "color": self.color_net, "text": vol_str})
+                trade_marker_list.append({"time": trade_pair['close_dt'], "position": 'inside', "shape": 'circle', "color": self.color_net, "text": vol_str})
+                # main_chart.marker(trade_pair['open_dt'], 'inside', 'circle', self.color_net, vol_str)
+                # main_chart.marker(trade_pair['close_dt'], 'inside', 'circle', self.color_net, vol_str)
 
                 line_color = self.color_net
 
             main_chart.trend_line(trade_pair['open_dt'], trade_pair['open_price'],
                              trade_pair['close_dt'], trade_pair['close_price'],
                              False, line_color, 2, 'dashed')
+        # 批量设定买卖标记，更快
+        main_chart.marker_list(trade_marker_list)
+        del trade_marker_list
 
         # 设置指标
         if indicators is not None:
@@ -1821,6 +1841,15 @@ class CandleChartDialog_v2():
                             d = {"time": t, "position": m.position, "shape": m.shape, "color": m.color, "text": m.text}
                             marker_list.append(d)
                     chart.marker_list(marker_list)
+
+        # lightweight-charts 的bug，如果 markers 不是按时间顺序排列，则会造成一部分markers显示出现问题
+        for chart in chart_dict.values():
+            # 取出 markers ，手动按时间排序，再替换回去，再更新标记
+            markers = sorted(list(chart.markers.items()), key=lambda x: x[1]['time'])
+            new_dict = dict(markers)
+            chart.markers = new_dict
+            chart._update_markers()
+        # ----------------------------------------------------------------------------------
 
         widget.show()
         widget.activateWindow()
