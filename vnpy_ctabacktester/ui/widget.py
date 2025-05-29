@@ -46,7 +46,8 @@ TICK_BAR_MODE = {
     '12sec': 12,
     '15sec': 15,
     '20sec': 20,
-    '30sec': 30
+    '30sec': 30,
+    '60sec': 60,
 }
 
 DIVIDEND_MODE = [e.value for e in Dividend]
@@ -263,8 +264,8 @@ class BacktesterManager(QtWidgets.QWidget):
         middle_vbox.addWidget(self.log_monitor)
 
         left_hbox: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
-        left_hbox.addLayout(left_vbox)
-        left_hbox.addLayout(middle_vbox)
+        left_hbox.addLayout(left_vbox, stretch=1)
+        left_hbox.addLayout(middle_vbox, stretch=2)
 
         left_widget: QtWidgets.QWidget = QtWidgets.QWidget()
         left_widget.setLayout(left_hbox)
@@ -276,8 +277,8 @@ class BacktesterManager(QtWidgets.QWidget):
         right_widget.setLayout(right_vbox)
 
         hbox: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
-        hbox.addWidget(left_widget)
-        hbox.addWidget(right_widget)
+        hbox.addWidget(left_widget, stretch=1)
+        hbox.addWidget(right_widget, stretch=1)
         self.setLayout(hbox)
 
     def load_backtesting_setting(self) -> None:
@@ -701,6 +702,10 @@ class StatisticsMonitor(QtWidgets.QTableWidget):
             self.setItem(row, 0, cell)
             self.cells[key] = cell
 
+        # 设定最佳大小
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+        self.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContentsOnFirstShow)
+
     def clear_data(self) -> None:
         """"""
         for cell in self.cells.values():
@@ -873,6 +878,14 @@ class BacktesterChart(pg.GraphicsLayoutWidget):
             fillLevel=-0.3, brush=distribution_color, pen=distribution_color
         )
 
+        # 设定状态，自动缩放，绘制网格线
+        self.auto_scale_chart()
+
+    def auto_scale_chart(self):
+        for plot in [self.balance_plot, self.drawdown_plot, self.pnl_plot, self.distribution_plot]:
+            plot.showGrid(x=True, y=True, alpha=0.75)
+            plot.enableAutoRange(x=True, y=True)
+
     def clear_data(self) -> None:
         """"""
         self.balance_curve.setData([], [])
@@ -917,6 +930,9 @@ class BacktesterChart(pg.GraphicsLayoutWidget):
         hist, x = np.histogram(df["net_pnl"], bins="doane")
         x = x[:-1]
         self.distribution_curve.setData(x, hist)
+
+        # 自动缩放图表
+        self.auto_scale_chart()
 
 
 class DateAxis(pg.AxisItem):
